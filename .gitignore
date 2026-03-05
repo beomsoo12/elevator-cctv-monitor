@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+logs/
+debug/
+dataset/
+models/*.keras
+models/training_history/*.png
+*.egg-info/
+dist/
+build/

@@ -1,0 +1,48 @@
+capture:
+  fps: 3
+  save_debug_frames: false
+floors:
+- 1
+- 2
+- 3
+- 4
+logging:
+  file: logs/events.log
+  level: INFO
+  max_size_mb: 10
+model:
+  cargo_threshold: 0.75
+  confirm_frames: 5
+  floor_threshold: 0.85
+  input_size:
+  - 224
+  - 224
+monitor:
+  index: 1
+roi:
+  elevator_1:
+  - 140
+  - 63
+  - 606
+  - 491
+  elevator_2:
+  - 1091
+  - 70
+  - 600
+  - 486
+  panel_1:
+  - 143
+  - 595
+  - 604
+  - 404
+  panel_2:
+  - 1104
+  - 595
+  - 581
+  - 380
+siren:
+  baud_rate: 9600
+  delay_seconds: 10
+  duration_seconds: 5
+  interface: dummy
+  port: COM3
