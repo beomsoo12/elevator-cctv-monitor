@@ -14,7 +14,7 @@ class State(Enum):
     IDLE = auto()
     CARGO_PRESENT = auto()
     FLOOR_ARRIVED = auto()
-    SIREN_PENDING = auto()
+    SIREN_ACTIVE = auto()  # Siren ON, waiting for cargo removal
 
 
 class ElevatorStateMachine:
@@ -31,7 +31,9 @@ class ElevatorStateMachine:
         self._timer = None
         self._timer_start = 0
         self._lock = threading.Lock()
-        self._siren_fired_floor = 0  # Prevent repeat siren on same floor
+        self._siren_floor = 0  # Floor where siren is currently active
+        self.siren_enabled = True
+        self.disabled_floors = set()  # floors where siren is disabled
 
     def update(self, cargo_confirmed, floor_confirmed):
         """Called every frame with confirmed predictions.
@@ -53,28 +55,23 @@ class ElevatorStateMachine:
                 self._handle_cargo_present(cargo_confirmed, floor_confirmed)
             elif self.state == State.FLOOR_ARRIVED:
                 self._handle_floor_arrived(cargo_confirmed, floor_confirmed)
-            elif self.state == State.SIREN_PENDING:
-                pass  # Waiting for siren to complete
+            elif self.state == State.SIREN_ACTIVE:
+                self._handle_siren_active(cargo_confirmed, floor_confirmed)
 
     def _handle_idle(self, cargo_confirmed, floor_confirmed):
         if cargo_confirmed is True:
             self._transition(State.CARGO_PRESENT)
             log_cargo_detected(self.elevator_id, self.current_floor, 0.0)
-        # Reset siren-fired tracking when floor changes while idle
-        if (floor_confirmed is not None and floor_confirmed != 0
-                and floor_confirmed != self._siren_fired_floor):
-            self._siren_fired_floor = 0
 
     def _handle_cargo_present(self, cargo_confirmed, floor_confirmed):
         if cargo_confirmed is False:
             self._transition(State.IDLE)
             return
 
-        # Check for floor change (skip if siren already fired on this floor)
+        # Check for floor change → start delay timer
         if (floor_confirmed is not None and floor_confirmed != 0
                 and self.previous_floor != 0
-                and floor_confirmed != self.previous_floor
-                and floor_confirmed != self._siren_fired_floor):
+                and floor_confirmed != self.previous_floor):
             self._transition(State.FLOOR_ARRIVED)
             log_floor_arrived(self.elevator_id, self.current_floor)
             self._start_timer()
@@ -110,20 +107,47 @@ class ElevatorStateMachine:
             self._timer = None
             logger.debug(f"[{self.elevator_id}] Timer cancelled")
 
+    def _handle_siren_active(self, cargo_confirmed, floor_confirmed):
+        """Siren is ON. Keep it on until cargo is removed."""
+        if cargo_confirmed is False:
+            # Cargo removed → turn off siren, back to IDLE
+            floor = self._siren_floor
+            self.siren.stop(self.elevator_id, floor)
+            self._siren_floor = 0
+            self._transition(State.IDLE)
+            logger.info(f"[{self.elevator_id}] Siren OFF - cargo removed from {floor}F")
+
     def _on_timer_expired(self):
         with self._lock:
             if self.state != State.FLOOR_ARRIVED:
                 return
-            self._transition(State.SIREN_PENDING)
             floor = self.current_floor
-            self._siren_fired_floor = floor  # Remember: siren already fired here
+
+            # Check if siren is allowed
+            if not self.siren_enabled or floor in self.disabled_floors:
+                self._transition(State.CARGO_PRESENT)
+                log_siren_cancelled(self.elevator_id, floor, "siren disabled")
+                return
+
+            self._siren_floor = floor
+            self._transition(State.SIREN_ACTIVE)
             log_siren_triggered(self.elevator_id, floor)
 
-        # Trigger siren (runs in its own thread)
+        # Turn siren ON (stays on until cargo removed)
         self.siren.trigger(self.elevator_id, floor)
 
+    def force_stop_siren(self):
+        """Force stop siren (called when user toggles siren off)."""
         with self._lock:
-            self._transition(State.IDLE)
+            if self.state == State.SIREN_ACTIVE and self._siren_floor:
+                floor = self._siren_floor
+                self.siren.stop(self.elevator_id, floor)
+                self._siren_floor = 0
+                self._transition(State.CARGO_PRESENT)
+                logger.info(f"[{self.elevator_id}] Siren force-stopped at {floor}F")
+            elif self.state == State.FLOOR_ARRIVED:
+                self._cancel_timer()
+                self._transition(State.CARGO_PRESENT)
 
     def _transition(self, new_state):
         old_state = self.state
@@ -143,9 +167,13 @@ class ElevatorStateMachine:
                 "floor": self.current_floor,
                 "cargo": self.state != State.IDLE,
                 "timer_remaining": round(timer_remaining, 1),
+                "siren_floor": self._siren_floor,
             }
 
     def shutdown(self):
         """Cancel timer and clean up."""
         self._cancel_timer()
+        if self._siren_floor:
+            self.siren.stop(self.elevator_id, self._siren_floor)
+            self._siren_floor = 0
         self.state = State.IDLE

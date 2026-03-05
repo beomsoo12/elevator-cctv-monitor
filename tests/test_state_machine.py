@@ -68,9 +68,37 @@ class TestStateMachine:
         # Wait for timer to expire (delay_seconds=1)
         time.sleep(1.5)
 
-        # Siren should have been triggered
+        # Siren should have been triggered and stay active
         mock_siren.trigger.assert_called_once_with("elevator_1", 3)
+        assert sm.state == State.SIREN_ACTIVE
+
+    def test_siren_off_when_cargo_removed(self, sm, mock_siren):
+        sm.current_floor = 1
+        sm.previous_floor = 1
+        sm.state = State.CARGO_PRESENT
+
+        sm.update(cargo_confirmed=True, floor_confirmed=3)
+        time.sleep(1.5)
+        assert sm.state == State.SIREN_ACTIVE
+
+        # Cargo removed → siren should stop
+        sm.update(cargo_confirmed=False, floor_confirmed=3)
         assert sm.state == State.IDLE
+        mock_siren.stop.assert_called_once_with("elevator_1", 3)
+
+    def test_siren_stays_on_while_cargo_present(self, sm, mock_siren):
+        sm.current_floor = 1
+        sm.previous_floor = 1
+        sm.state = State.CARGO_PRESENT
+
+        sm.update(cargo_confirmed=True, floor_confirmed=3)
+        time.sleep(1.5)
+        assert sm.state == State.SIREN_ACTIVE
+
+        # Cargo still present → siren stays on
+        sm.update(cargo_confirmed=True, floor_confirmed=3)
+        assert sm.state == State.SIREN_ACTIVE
+        mock_siren.stop.assert_not_called()
 
     def test_none_cargo_no_transition(self, sm):
         sm.update(cargo_confirmed=None, floor_confirmed=1)

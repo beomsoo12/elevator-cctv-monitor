@@ -80,6 +80,23 @@ S_LOG = """
     }
 """
 
+S_TOGGLE_ON = """
+    QPushButton {{
+        background-color: {bg}; color: #fff;
+        border: none; border-radius: 4px;
+        padding: 3px 8px; font-weight: bold; font-size: {size}px;
+    }}
+    QPushButton:hover {{ background-color: {hover}; }}
+"""
+S_TOGGLE_OFF = """
+    QPushButton {
+        background-color: #37474f; color: #607080;
+        border: none; border-radius: 4px;
+        padding: 3px 8px; font-weight: bold; font-size: 10px;
+    }
+    QPushButton:hover { background-color: #455a64; }
+"""
+
 
 # ════════════════════════════════════════════
 #  Compact Elevator Status Widget
@@ -167,7 +184,7 @@ class ElevatorMini(QFrame):
             "IDLE": "#8b949e",
             "CARGO_PRESENT": "#00e5ff",
             "FLOOR_ARRIVED": "#ffd600",
-            "SIREN_PENDING": "#ff1744",
+            "SIREN_ACTIVE": "#ff1744",
         }
         self.state_lbl.setText(state)
         self.state_lbl.setStyleSheet(f"color: {colors.get(state, '#8b949e')};")
@@ -196,7 +213,7 @@ class ElevatorMini(QFrame):
         self.timer_lbl.setText(f"{remaining}s" if remaining > 0 else "")
 
         # Card border highlight
-        if state == "SIREN_PENDING":
+        if state == "SIREN_ACTIVE":
             self.setStyleSheet(S_ELEV_CARD.format(border="#ff1744"))
         elif state == "FLOOR_ARRIVED":
             self.setStyleSheet(S_ELEV_CARD.format(border="#ffd600"))
@@ -348,6 +365,8 @@ class MainWindow(QMainWindow):
         self._prev_s1 = "IDLE"
         self._prev_s2 = "IDLE"
         self._prev_sirens = {}
+        self.siren_master = True
+        self.siren_floor_enabled = {1: True, 2: True, 3: True, 4: True}
 
         self._build_ui()
         self._position_bottom()
@@ -447,6 +466,35 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.roi_status_lbl)
 
         toolbar.addStretch()
+
+        # ── Siren master switch ──
+        siren_lbl = QLabel("Siren:")
+        siren_lbl.setFont(QFont("Consolas", 9))
+        siren_lbl.setStyleSheet("color: #8b949e;")
+        toolbar.addWidget(siren_lbl)
+
+        self.siren_master_btn = QPushButton("ON")
+        self.siren_master_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.siren_master_btn.setFixedWidth(50)
+        self.siren_master_btn.clicked.connect(self._toggle_siren_master)
+        self._update_master_btn_style()
+        toolbar.addWidget(self.siren_master_btn)
+
+        # ── Per-floor siren switches ──
+        sep2 = QLabel("|")
+        sep2.setStyleSheet("color: #30363d;")
+        toolbar.addWidget(sep2)
+
+        self.floor_btns = {}
+        for f in range(1, 5):
+            btn = QPushButton(f"{f}F")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedWidth(36)
+            btn.clicked.connect(lambda _, fl=f: self._toggle_siren_floor(fl))
+            toolbar.addWidget(btn)
+            self.floor_btns[f] = btn
+        self._update_floor_btn_styles()
+
         root.addLayout(toolbar)
 
         # ── Row 1: Elevator panels ──
@@ -485,6 +533,54 @@ class MainWindow(QMainWindow):
         self._timer.timeout.connect(self._tick)
         self._timer.start(interval)
 
+    # ── Siren switch callbacks ──
+    def _toggle_siren_master(self):
+        self.siren_master = not self.siren_master
+        self.sm1.siren_enabled = self.siren_master
+        self.sm2.siren_enabled = self.siren_master
+        self._update_master_btn_style()
+        if not self.siren_master:
+            self.sm1.force_stop_siren()
+            self.sm2.force_stop_siren()
+            self.event_log.add_event("Siren MASTER OFF")
+        else:
+            self.event_log.add_event("Siren MASTER ON")
+
+    def _toggle_siren_floor(self, floor):
+        self.siren_floor_enabled[floor] = not self.siren_floor_enabled[floor]
+        enabled = self.siren_floor_enabled[floor]
+
+        # Sync to state machines
+        for sm in (self.sm1, self.sm2):
+            if enabled:
+                sm.disabled_floors.discard(floor)
+            else:
+                sm.disabled_floors.add(floor)
+                # If siren active on this floor, force stop
+                if sm._siren_floor == floor:
+                    sm.force_stop_siren()
+
+        self._update_floor_btn_styles()
+        state = "ON" if enabled else "OFF"
+        self.event_log.add_event(f"Siren {floor}F {state}")
+
+    def _update_master_btn_style(self):
+        if self.siren_master:
+            self.siren_master_btn.setText("ON")
+            self.siren_master_btn.setStyleSheet(
+                S_TOGGLE_ON.format(bg="#b71c1c", hover="#d32f2f", size=10))
+        else:
+            self.siren_master_btn.setText("OFF")
+            self.siren_master_btn.setStyleSheet(S_TOGGLE_OFF)
+
+    def _update_floor_btn_styles(self):
+        for f, btn in self.floor_btns.items():
+            if self.siren_floor_enabled[f]:
+                btn.setStyleSheet(
+                    S_TOGGLE_ON.format(bg="#c62828", hover="#e53935", size=10))
+            else:
+                btn.setStyleSheet(S_TOGGLE_OFF)
+
     # ── Simulation callbacks ──
     def _on_cargo(self, num):
         self.sim_cargo[num] = not self.sim_cargo[num]
@@ -505,8 +601,10 @@ class MainWindow(QMainWindow):
                 self.event_log.add_event(f"{label} cargo detected (floor {sm.current_floor})")
             elif curr == "FLOOR_ARRIVED":
                 self.event_log.add_event(f"{label} arrived {sm.current_floor}F - timer started")
-            elif curr == "SIREN_PENDING":
-                self.event_log.add_event(f"{label} {sm.current_floor}F SIREN TRIGGERED!")
+            elif curr == "SIREN_ACTIVE":
+                self.event_log.add_event(f"{label} {sm.current_floor}F SIREN ON (until cargo removed)")
+            elif curr == "IDLE" and prev == "SIREN_ACTIVE":
+                self.event_log.add_event(f"{label} cargo removed - siren OFF")
             elif curr == "IDLE" and prev != "IDLE":
                 self.event_log.add_event(f"{label} returned to idle")
         return curr

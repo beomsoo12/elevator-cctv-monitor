@@ -39,39 +39,23 @@ class DummySirenController(BaseSirenController):
 
     def __init__(self, duration_seconds=5):
         self.duration = duration_seconds
-        self._active = {}       # floor -> threading.Event
         self._active_info = {}  # floor -> elevator_id
         self._lock = threading.Lock()
         logger.info("DummySirenController initialized (no actual siren)")
 
     def trigger(self, elevator_id, floor):
         with self._lock:
-            if floor in self._active:
+            if floor in self._active_info:
                 logger.info(f"[DUMMY] Floor {floor} siren already active, skipping")
                 return
-
-            stop_event = threading.Event()
-            self._active[floor] = stop_event
             self._active_info[floor] = elevator_id
-
-        def _run():
-            logger.warning(f"[DUMMY SIREN ON] {elevator_id} -> Floor {floor}")
-            stop_event.wait(timeout=self.duration)
-            with self._lock:
-                self._active.pop(floor, None)
-                self._active_info.pop(floor, None)
-            logger.info(f"[DUMMY SIREN OFF] Floor {floor}")
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
+        logger.warning(f"[DUMMY SIREN ON] {elevator_id} -> Floor {floor}")
 
     def stop(self, elevator_id, floor):
         with self._lock:
-            event = self._active.pop(floor, None)
-            self._active_info.pop(floor, None)
-        if event:
-            event.set()
-            logger.info(f"[DUMMY] Floor {floor} siren stopped early")
+            removed = self._active_info.pop(floor, None)
+        if removed:
+            logger.info(f"[DUMMY SIREN OFF] Floor {floor}")
 
     def get_active_sirens(self):
         with self._lock:
@@ -84,7 +68,6 @@ class UsbRelaySirenController(BaseSirenController):
     def __init__(self, port, baud_rate=9600, duration_seconds=5):
         import serial
         self.duration = duration_seconds
-        self._active = {}
         self._active_info = {}
         self._lock = threading.Lock()
         try:
@@ -108,35 +91,21 @@ class UsbRelaySirenController(BaseSirenController):
             return
 
         with self._lock:
-            if floor in self._active:
+            if floor in self._active_info:
                 logger.info(f"Floor {floor} siren already active")
                 return
-            stop_event = threading.Event()
-            self._active[floor] = stop_event
             self._active_info[floor] = elevator_id
 
-        def _run():
-            logger.warning(f"[SIREN ON] {elevator_id} -> Floor {floor} (CH{channel})")
-            self._send_command(channel, on=True)
-            stop_event.wait(timeout=self.duration)
-            self._send_command(channel, on=False)
-            with self._lock:
-                self._active.pop(floor, None)
-                self._active_info.pop(floor, None)
-            logger.info(f"[SIREN OFF] Floor {floor} (CH{channel})")
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
+        logger.warning(f"[SIREN ON] {elevator_id} -> Floor {floor} (CH{channel})")
+        self._send_command(channel, on=True)
 
     def stop(self, elevator_id, floor):
         channel = RELAY_CHANNEL_MAP.get(floor)
         with self._lock:
-            event = self._active.pop(floor, None)
-            self._active_info.pop(floor, None)
-        if event:
-            event.set()
-        if channel:
+            removed = self._active_info.pop(floor, None)
+        if removed and channel:
             self._send_command(channel, on=False)
+            logger.info(f"[SIREN OFF] Floor {floor} (CH{channel})")
 
     def get_active_sirens(self):
         with self._lock:
@@ -161,7 +130,6 @@ class SerialSirenController(BaseSirenController):
         import serial
         import json
         self.duration = duration_seconds
-        self._active = {}
         self._active_info = {}
         self._lock = threading.Lock()
         self._json = json
@@ -179,39 +147,26 @@ class SerialSirenController(BaseSirenController):
 
     def trigger(self, elevator_id, floor):
         with self._lock:
-            if floor in self._active:
+            if floor in self._active_info:
                 return
-            stop_event = threading.Event()
-            self._active[floor] = stop_event
             self._active_info[floor] = elevator_id
 
-        def _run():
-            logger.warning(f"[SERIAL SIREN ON] {elevator_id} -> Floor {floor}")
-            self._send_json(elevator_id, floor, "ON")
-            stop_event.wait(timeout=self.duration)
-            self._send_json(elevator_id, floor, "OFF")
-            with self._lock:
-                self._active.pop(floor, None)
-                self._active_info.pop(floor, None)
-            logger.info(f"[SERIAL SIREN OFF] Floor {floor}")
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
+        logger.warning(f"[SERIAL SIREN ON] {elevator_id} -> Floor {floor}")
+        self._send_json(elevator_id, floor, "ON")
 
     def stop(self, elevator_id, floor):
         with self._lock:
-            event = self._active.pop(floor, None)
-            self._active_info.pop(floor, None)
-        if event:
-            event.set()
-        self._send_json(elevator_id, floor, "OFF")
+            removed = self._active_info.pop(floor, None)
+        if removed:
+            self._send_json(elevator_id, floor, "OFF")
+            logger.info(f"[SERIAL SIREN OFF] Floor {floor}")
 
     def get_active_sirens(self):
         with self._lock:
             return dict(self._active_info)
 
     def close(self):
-        for floor in list(self._active):
+        for floor in list(self._active_info):
             self.stop("shutdown", floor)
         if hasattr(self, "ser") and self.ser.is_open:
             self.ser.close()
